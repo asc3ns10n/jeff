@@ -656,7 +656,11 @@ impl AnalyzerState {
                         };
                         if second > addr {
                             // don't try to add a function where there's an exception symbol
-                            if obj.exception_data_infos.contains(&addr) {
+                            // or a known jump table (MSVC puts absolute jump tables inline
+                            // in .text; the gap after a switch dispatcher is the table)
+                            if obj.exception_data_infos.contains(&addr)
+                                || self.jump_tables.contains_key(&addr)
+                            {
                                 continue;
                             }
                             log::trace!(
