@@ -162,13 +162,17 @@ fn add_to_obj(
         sig_refs
     };
     // if we don't have a matching OutReference count by this point, this can't be our func
-    ensure!(
-        discovered_refs.len() == signature_refs.len(),
-        "Mismatch in reference count for function {}! (expected {}, got {})",
-        sig.name,
-        signature_refs.len(),
-        discovered_refs.len()
-    );
+    if discovered_refs.len() != signature_refs.len() {
+        // Not this signature after all (or the relocation analysis saw a
+        // different reference set); skip it rather than abort the split.
+        log::warn!(
+            "Mismatch in reference count for function {} (expected {}, got {}); skipping signature",
+            sig.name,
+            signature_refs.len(),
+            discovered_refs.len()
+        );
+        return Ok(applied_symbols);
+    }
     for i in 0..discovered_refs.len() {
         if !signature_refs[i].skip {
             applied_symbols.insert(add_symbol_from_reference(
