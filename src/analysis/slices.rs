@@ -349,7 +349,10 @@ impl FunctionSlices {
                 }
             }
             StepResult::Illegal => {
-                if ins.code == 0 {
+                if !section.contains((ins_addr + 4).address) {
+                    self.blocks.insert(block_start, Some(ins_addr + 4));
+                    Ok(ExecCbResult::EndBlock)
+                } else if ins.code == 0 {
                     log::debug!("Hit zeroed padding @ {:#010X}", ins_addr);
                     Ok(ExecCbResult::End(false))
                 } else {

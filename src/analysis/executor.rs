@@ -113,12 +113,11 @@ impl Executor {
 
             let mut block_start = state.address;
             loop {
-                self.visited.insert(section_address, state.address);
-
                 let ins = match disassemble(section, state.address.address) {
                     Some(ins) => ins,
                     None => return Ok(None),
                 };
+                self.visited.insert(section_address, state.address);
                 let result = state.vm.step(obj, state.address, ins);
                 match cb(ExecCbData {
                     executor: self,
