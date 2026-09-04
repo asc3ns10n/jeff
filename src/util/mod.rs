@@ -1,6 +1,7 @@
 use std::{borrow::Cow, ops::Deref};
 
 pub mod asm;
+pub mod coff_symbols;
 pub mod config;
 pub mod crypto;
 pub mod dep;

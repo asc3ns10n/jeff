@@ -50,6 +50,10 @@ flags! {
         NoExport,
         /// Symbol does not contain any relocations
         NoReloc,
+        /// COFF definition must be visible to other objects (recomputed at split time).
+        CoffExternal,
+        /// Input symbols.txt spelling, authoritative over automatic recognition.
+        NameFromConfig,
     }
 }
 

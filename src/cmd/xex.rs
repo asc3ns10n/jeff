@@ -1,20 +1,15 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     fs::{self, DirBuilder, File},
     io::{BufWriter, Write},
     time::UNIX_EPOCH,
 };
 
-use anyhow::{Context, Ok, Result, bail};
+use anyhow::{Context, Ok, Result};
 use argp::FromArgs;
 use chrono::FixedOffset;
 use itertools::Itertools;
-use object::{
-    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind,
-    SymbolScope,
-    read::pe::PeFile32,
-    write::{Object, Relocation, SectionId, Symbol, SymbolId, SymbolSection},
-};
+use object::read::pe::PeFile32;
 use tracing::{debug, info};
 use typed_path::{Utf8NativePath, Utf8NativePathBuf};
 use xxhash_rust::xxh3::xxh3_64;
@@ -31,11 +26,12 @@ use crate::{
         apply_block_relocations,
     },
     obj::{
-        ObjInfo, ObjKind, ObjRelocKind, ObjSectionKind, ObjSections, ObjSymbolKind, ObjSymbolScope,
-        ObjUnit, SectionIndex, SymbolIndex, best_match_for_reloc,
+        ObjInfo, ObjKind, ObjRelocKind, ObjSections, ObjSymbolFlags, ObjSymbolKind, ObjUnit,
+        best_match_for_reloc,
     },
     util::{
         asm::write_asm,
+        coff_symbols::prepare_coff_symbols,
         config::{apply_splits_file, apply_symbols_file, write_splits_file, write_symbols_file},
         dep::DepFile,
         exe::InputtedExecutable,
@@ -252,6 +248,8 @@ fn split_write_obj_exe(
     debug!("Adjusting splits");
     update_splits(&mut module.obj, None, false, !config.quick_analysis)?;
 
+    prepare_coff_symbols(&mut module.obj)?;
+
     debug!("Writing configuration");
     if let Some(symbols_path) = &module.config.symbols {
         write_symbols_file(
@@ -454,6 +452,14 @@ fn load_analyze_xex(config: &ProjectConfig) -> Result<ExeAnalyzeResult> {
     };
 
     // Apply block relocations from config
+    // Analysis may recognize a signature at a hand-renamed address. Keep the
+    // user's spelling (including a prior COFF qualification) authoritative.
+    let configured_names: Vec<_> = obj
+        .symbols
+        .iter()
+        .filter(|(_, symbol)| symbol.flags.0.contains(ObjSymbolFlags::NameFromConfig))
+        .map(|(index, symbol)| (index, symbol.name.clone(), symbol.demangled_name.clone()))
+        .collect();
     apply_block_relocations(&mut obj, &config.base.block_relocations)?;
 
     if !config.symbols_known {
@@ -471,6 +477,12 @@ fn load_analyze_xex(config: &ProjectConfig) -> Result<ExeAnalyzeResult> {
     }
 
     // Apply additional relocations from config
+    for (index, name, demangled_name) in configured_names {
+        let mut symbol = obj.symbols[index].clone();
+        symbol.name = name;
+        symbol.demangled_name = demangled_name;
+        obj.symbols.replace(index, symbol)?;
+    }
     apply_add_relocations(&mut obj, &config.base.add_relocations)?;
 
     Ok(ExeAnalyzeResult {
@@ -551,6 +563,7 @@ fn disasm(args: DisasmArgs) -> Result<()> {
     // Gamepad Release
     apply_splits_file(&args.out, &mut obj)?;
     update_splits(&mut obj, None, false, true)?;
+    prepare_coff_symbols(&mut obj)?;
     let split_objs = split_obj(&obj, None)?;
 
     for coff_obj in &split_objs {
@@ -561,99 +574,7 @@ fn disasm(args: DisasmArgs) -> Result<()> {
         let root_name = coff_obj.name.split('.').next().unwrap();
         println!("Root name: {}", root_name);
 
-        // for each obj:
-        let mut cur_coff = Object::new(BinaryFormat::Coff, Architecture::PowerPc, Endianness::Big);
-        let mut sect_map: BTreeMap<SectionIndex, SectionId> = Default::default();
-        let mut sym_map: BTreeMap<SymbolIndex, SymbolId> = Default::default();
-
-        // insert the sections
-        for (idx, sect) in coff_obj.sections.iter() {
-            println!("Section: {}", sect.name);
-            let sect_id = cur_coff.add_section(
-                Vec::new(),
-                sect.name.clone().into_bytes(),
-                match sect.kind {
-                    ObjSectionKind::Code => SectionKind::Text,
-                    ObjSectionKind::Data => SectionKind::Data,
-                    ObjSectionKind::ReadOnlyData => SectionKind::ReadOnlyData,
-                    ObjSectionKind::Bss => SectionKind::UninitializedData,
-                },
-            );
-            cur_coff.append_section_data(sect_id, &sect.data, sect.align);
-            sect_map.insert(idx, sect_id);
-        }
-
-        // for (idx, sym) in coff_obj.symbols.iter() {
-        //     if sym.kind == ObjSymbolKind::Unknown {
-        //         println!("Unknown symbol {}!", sym.name);
-        //     }
-        // }
-
-        // insert the symbols
-        for (idx, sym) in coff_obj.symbols.iter() {
-            // if sym.kind == ObjSymbolKind::Unknown {
-            //     let the_master_sym = obj.symbols.by_name(&sym.name)?;
-            //     if the_master_sym.is_some(){
-            //         println!("{} kind: {:?}", sym.name, the_master_sym.unwrap().1.kind);
-            //     }
-            // }
-
-            let sym_id = cur_coff.add_symbol(Symbol {
-                name: sym.name.clone().into_bytes(),
-                value: match sym.section {
-                    Some(idx) => match coff_obj.sections.get(idx) {
-                        Some(sect) => (sym.address - sect.address) as u64,
-                        None => bail!("Could not find section for symbol {}!", sym.name),
-                    },
-                    None => 0,
-                },
-                size: 0,
-                kind: match sym.kind {
-                    ObjSymbolKind::Function => SymbolKind::Text,
-                    ObjSymbolKind::Object => SymbolKind::Data,
-                    ObjSymbolKind::Section => SymbolKind::Section,
-                    ObjSymbolKind::Unknown => SymbolKind::Label,
-                },
-                scope: match sym.flags.scope() {
-                    ObjSymbolScope::Local => SymbolScope::Compilation,
-                    _ => SymbolScope::Linkage,
-                    // ObjSymbolScope::Global => SymbolScope::Linkage,
-                    // ObjSymbolScope::Weak => SymbolScope::Linkage, // verify this
-                    // ObjSymbolScope::Unknown => SymbolScope::Unknown,
-                },
-                weak: false, // sym.flags.scope() == ObjSymbolScope::Weak,
-                section: match sym.section {
-                    Some(idx) => SymbolSection::Section(*sect_map.get(&idx).unwrap()),
-                    None => SymbolSection::Undefined,
-                },
-                flags: SymbolFlags::None,
-            });
-            sym_map.insert(idx, sym_id);
-        }
-
-        // insert the relocs
-        for (sect_idx, sect) in coff_obj.sections.iter() {
-            for (addr, reloc) in sect.relocations.iter() {
-                let sym_id = match sym_map.get(&reloc.target_symbol) {
-                    Some(id) => id,
-                    None => bail!("Could not find symbol ID for index {}", reloc.target_symbol),
-                };
-                cur_coff.add_relocation(
-                    *sect_map.get(&sect_idx).unwrap(),
-                    Relocation {
-                        offset: addr as u64,
-                        symbol: *sym_id,
-                        addend: 0,
-                        flags: RelocationFlags::Coff {
-                            typ: reloc.to_coff(),
-                        },
-                    },
-                )?;
-            }
-        }
-
-        // finally, write the COFF
-        let coff_data = cur_coff.write()?;
+        let coff_data = write_coff(coff_obj)?;
         std::fs::write(format!("{}.obj", root_name), coff_data)?;
     }
     Ok(())

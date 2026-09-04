@@ -86,7 +86,20 @@ fn create_gap_splits(obj: &mut ObjInfo) -> Result<()> {
                     .collect_vec();
                 let mut existing_symbols = HashSet::new();
                 for &(_, symbol) in &symbols {
-                    if !existing_symbols.insert(symbol.name.clone()) {
+                    // Address qualification must not merge the old duplicate-name
+                    // gap splits when symbols.txt is read on the next invocation.
+                    let layout_name =
+                        crate::util::coff_symbols::original_name(&symbol.name, symbol.address);
+                    let layout_name = if obj
+                        .symbols
+                        .for_name(layout_name)
+                        .any(|(_, other)| other.address < symbol.address)
+                    {
+                        layout_name
+                    } else {
+                        symbol.name.as_str()
+                    };
+                    if !existing_symbols.insert(layout_name.to_owned()) {
                         log::debug!(
                             "Found duplicate symbol {} at {:#010X}",
                             symbol.name,
@@ -180,6 +193,52 @@ fn create_gap_splits(obj: &mut ObjInfo) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod coff_layout_tests {
+    use super::*;
+
+    #[test]
+    fn qualified_names_keep_gap_layout_without_collapsing_address_labels() -> Result<()> {
+        let symbols = [
+            ("duplicate", 0x1000),
+            ("lbl_00001001", 0x1001),
+            ("lbl_00001002", 0x1002),
+            ("duplicate", 0x1008),
+        ]
+        .map(|(name, address)| ObjSymbol {
+            name: name.into(),
+            address,
+            section: Some(0),
+            ..Default::default()
+        })
+        .to_vec();
+        let mut image = ObjInfo::new(
+            ObjKind::Executable,
+            "fixture".into(),
+            symbols,
+            vec![crate::obj::ObjSection {
+                name: ".data".into(),
+                address: 0x1000,
+                size: 16,
+                data: vec![0; 16],
+                kind: ObjSectionKind::Data,
+                ..Default::default()
+            }],
+        );
+        let mut qualified = image.clone();
+        create_gap_splits(&mut image)?;
+        crate::util::coff_symbols::prepare_coff_symbols(&mut qualified)?;
+        create_gap_splits(&mut qualified)?;
+        assert_eq!(image.link_order, qualified.link_order);
+        assert_eq!(
+            image.sections[0].splits.iter().collect_vec(),
+            qualified.sections[0].splits.iter().collect_vec()
+        );
+        assert_eq!(image.link_order.len(), 2);
+        Ok(())
+    }
 }
 
 /// Final validation of splits.

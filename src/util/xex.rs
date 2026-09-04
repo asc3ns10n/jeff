@@ -12,8 +12,8 @@ use typed_path::{Utf8NativePathBuf, Utf8UnixPath};
 use crate::{
     array_ref,
     obj::{
-        ObjInfo, ObjRelocKind, ObjSection, ObjSectionKind, ObjSymbolKind, ObjSymbolScope,
-        SectionIndex, SymbolIndex,
+        ObjInfo, ObjRelocKind, ObjSection, ObjSectionKind, ObjSymbolFlags, ObjSymbolKind,
+        ObjSymbolScope, SectionIndex, SymbolIndex,
     },
     util::{
         crypto::decrypt_aes128_cbc_no_padding,
@@ -524,7 +524,10 @@ pub fn write_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
                         .section
                         .and_then(|i| obj.sections.get(i))
                         .map_or(false, |s| s.kind == ObjSectionKind::Code);
-                    if in_code && sym.name.starts_with("jumptable_") {
+                    if in_code
+                        && sym.name.starts_with("jumptable_")
+                        && !sym.flags.0.contains(ObjSymbolFlags::CoffExternal)
+                    {
                         SymbolKind::Label
                     } else {
                         SymbolKind::Data
@@ -532,6 +535,9 @@ pub fn write_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
                 }
                 ObjSymbolKind::Section => SymbolKind::Section,
                 ObjSymbolKind::Unknown => match sym.section {
+                    Some(_) if sym.flags.0.contains(ObjSymbolFlags::CoffExternal) => {
+                        SymbolKind::Data
+                    }
                     Some(_) => SymbolKind::Label,
                     None => SymbolKind::Unknown,
                 },
@@ -593,7 +599,7 @@ pub fn write_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
 
     // finally, write the COFF
     let coff_data = cur_coff.write()?;
-    Ok(coff_data)
+    crate::util::coff_symbols::add_function_sizes(coff_data, obj)
 }
 
 pub fn coff_path_for_unit(unit: &str) -> Utf8NativePathBuf {

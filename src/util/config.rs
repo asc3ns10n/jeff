@@ -57,7 +57,8 @@ pub fn apply_symbols_file(
                 Err(e) => bail!("Failed to process symbols file: {e:?}"),
             };
             if let Some(symbol) = parse_symbol_line(&line, obj)? {
-                obj.add_symbol(symbol, true)?;
+                let index = obj.add_symbol(symbol, true)?;
+                obj.symbols.flags(index).0 |= ObjSymbolFlags::NameFromConfig;
             }
         }
         Some(cached)
