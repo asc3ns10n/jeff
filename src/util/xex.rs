@@ -473,6 +473,14 @@ fn adjusted_data_for_relocs(section: &ObjSection) -> Result<Vec<u8>> {
 }
 
 pub fn write_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
+    write_coff_mode(obj, false)
+}
+
+pub fn write_link_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
+    write_coff_mode(obj, true)
+}
+
+fn write_coff_mode(obj: &ObjInfo, link: bool) -> Result<Vec<u8>> {
     // let root_name = obj.name.split('.').next().unwrap();
     // println!("Writing {}.obj", root_name);
 
@@ -495,9 +503,46 @@ pub fn write_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
                 ObjSectionKind::Bss => SectionKind::UninitializedData,
             },
         );
+        if link {
+            // The original XEX's small .XEXID is packed with data despite its
+            // nonpageable flag. Native link.exe otherwise starts a 64 KiB group.
+            let characteristics = sect.original_flags.map(|flags| {
+                if sect.name == ".XEXID" {
+                    flags & !0x02000000
+                } else {
+                    flags
+                }
+            });
+            if let Some(characteristics) = characteristics {
+                cur_coff.section_mut(sect_id).flags =
+                    object::SectionFlags::Coff { characteristics };
+            }
+        }
         if sect.kind != ObjSectionKind::Bss {
-            let data_to_write = adjusted_data_for_relocs(sect)?;
+            let mut data_to_write = adjusted_data_for_relocs(sect)?;
+            if link {
+                for (offset, reloc) in sect.relocations.iter() {
+                    let offset = offset as usize;
+                    let mut word =
+                        u32::from_be_bytes(data_to_write[offset..offset + 4].try_into()?);
+                    let addend = reloc.addend as u32;
+                    word |= match reloc.kind {
+                        ObjRelocKind::Absolute => addend,
+                        ObjRelocKind::PpcAddr16Ha => (addend.wrapping_add(0x8000) >> 16) & 0xFFFF,
+                        ObjRelocKind::PpcAddr16Hi => (addend >> 16) & 0xFFFF,
+                        ObjRelocKind::PpcAddr16Lo => addend & 0xFFFF,
+                        // XDK subtracts the contribution VA, not the fixup VA.
+                        ObjRelocKind::PpcRel14 => addend.wrapping_sub(offset as u32) & 0xFFFC,
+                        ObjRelocKind::PpcRel24 => addend.wrapping_sub(offset as u32) & 0x3FFFFFC,
+                        ObjRelocKind::PpcEmbSda21 => bail!("Unsupported link relocation SDA21"),
+                    };
+                    data_to_write[offset..offset + 4].copy_from_slice(&word.to_be_bytes());
+                }
+            }
             cur_coff.append_section_data(sect_id, &data_to_write, sect.align);
+        }
+        if link && sect.kind == ObjSectionKind::Bss {
+            cur_coff.append_section_bss(sect_id, sect.size as u64, sect.align);
         }
         sect_map.insert(idx, sect_id);
     }
@@ -599,7 +644,35 @@ pub fn write_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
 
     // finally, write the COFF
     let coff_data = cur_coff.write()?;
-    crate::util::coff_symbols::add_function_sizes(coff_data, obj)
+    let mut coff_data = crate::util::coff_symbols::add_function_sizes(coff_data, obj)?;
+    if link {
+        // PAIR carries a signed low displacement, not a COFF symbol index.
+        // Patch after auxiliary-record insertion has remapped the real indices.
+        for (index, section) in obj.sections.iter() {
+            let header = 20 + index as usize * 40;
+            let table =
+                u32::from_le_bytes(coff_data[header + 24..header + 28].try_into()?) as usize;
+            let flags = u32::from_le_bytes(coff_data[header + 36..header + 40].try_into()?);
+            let mut record = if flags & object::pe::IMAGE_SCN_LNK_NRELOC_OVFL != 0 {
+                1
+            } else {
+                0
+            };
+            for (_, reloc) in section.relocations.iter() {
+                record += 1;
+                if matches!(
+                    reloc.kind,
+                    ObjRelocKind::PpcAddr16Ha | ObjRelocKind::PpcAddr16Lo
+                ) {
+                    let offset = table + record * 10 + 4;
+                    let low = reloc.addend as i16 as i32 as u32;
+                    coff_data[offset..offset + 4].copy_from_slice(&low.to_le_bytes());
+                    record += 1;
+                }
+            }
+        }
+    }
+    Ok(coff_data)
 }
 
 pub fn coff_path_for_unit(unit: &str) -> Utf8NativePathBuf {

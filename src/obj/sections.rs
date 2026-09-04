@@ -32,6 +32,10 @@ pub struct ObjSection {
     pub relocations: ObjRelocations,
     pub virtual_address: Option<u32>,
     pub file_offset: u64,
+    /// PE metadata used only by opt-in relinking, never by the diff writer.
+    pub original_flags: Option<u32>,
+    pub original_raw_size: Option<u32>,
+    pub original_data: Option<Vec<u8>>,
     pub splits: ObjSplits,
 }
 

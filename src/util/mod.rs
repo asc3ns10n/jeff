@@ -15,6 +15,7 @@ pub mod nlzss;
 pub mod path;
 pub mod read;
 pub mod reader;
+pub mod relink;
 pub mod signatures;
 pub mod split;
 pub mod take_seek;

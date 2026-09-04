@@ -947,6 +947,12 @@ pub fn split_obj(obj: &ObjInfo, module_name: Option<&str>) -> Result<Vec<ObjInfo
                     virtual_address: Some(current_address.address),
                     file_offset: section.file_offset
                         + (current_address.address - section.address) as u64,
+                    original_data: None,
+                    original_flags: section.original_flags,
+                    original_raw_size: section.original_raw_size.map(|size| {
+                        size.saturating_sub(current_address.address - section.address)
+                            .min(split_end.address - current_address.address)
+                    }),
                     splits: Default::default(),
                 });
             }

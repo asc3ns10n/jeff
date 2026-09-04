@@ -135,11 +135,17 @@ impl InputtedExecutable {
                 kind: section_kind,
                 address: section.address() as u32,
                 size: section.size() as u32,
+                original_data: Some(section_data.clone()),
                 data: section_data,
                 align: section.align(),
                 relocations: Default::default(),
                 virtual_address: None, // Loaded from section symbol
                 file_offset: section.file_range().map(|(v, _)| v).unwrap_or_default(),
+                original_flags: match section.flags() {
+                    object::SectionFlags::Coff { characteristics } => Some(characteristics),
+                    _ => None,
+                },
+                original_raw_size: Some(section.file_range().map_or(0, |(_, size)| size as u32)),
                 splits: Default::default(),
             });
         }

@@ -368,13 +368,30 @@ mod tests {
         prepare_coff_symbols(&mut image)?;
         let hashes = split_obj(&image, None)?
             .iter()
-            .map(|obj| Ok((obj.name.clone(), hex::encode(Sha1::digest(write_coff(obj)?)))))
+            .map(|obj| {
+                Ok((
+                    obj.name.clone(),
+                    hex::encode(Sha1::digest(write_coff(obj)?)),
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
-        assert_eq!(hashes, vec![
-            ("a".into(), "b2d702b6fa0238551c391f5797d660da6f4371d8".into()),
-            ("b".into(), "fcf56fc9a7d131195bb202421f97d28a776318b4".into()),
-            ("pdata".into(), "b88acc6f930f88d3ceb17e8a3fa69b13ec78ca6f".into()),
-        ]);
+        assert_eq!(
+            hashes,
+            vec![
+                (
+                    "a".into(),
+                    "b2d702b6fa0238551c391f5797d660da6f4371d8".into()
+                ),
+                (
+                    "b".into(),
+                    "fcf56fc9a7d131195bb202421f97d28a776318b4".into()
+                ),
+                (
+                    "pdata".into(),
+                    "b88acc6f930f88d3ceb17e8a3fa69b13ec78ca6f".into()
+                ),
+            ]
+        );
         Ok(())
     }
 
@@ -464,6 +481,149 @@ mod tests {
         let mut rewritten = Vec::new();
         write_symbols(&mut rewritten, &reloaded)?;
         assert_eq!(written, rewritten);
+        Ok(())
+    }
+
+    #[test]
+    fn link_contributions_preserve_identity_order_and_padding() -> Result<()> {
+        use crate::util::{relink::link_objects, xex::write_link_coff};
+        let mut image = fixture();
+        image.sections[0].size = 48;
+        image.sections[0].data = [
+            0x48000018u32,
+            0x4800000C,
+            0x48000014,
+            0x4182000C,
+            0x4BFFFFF0,
+            0x60000000,
+            0x4E800020,
+            0x4E800020,
+            0x3C608201,
+            0x38639004,
+            0x60000000,
+            0x4E800020,
+        ]
+        .into_iter()
+        .flat_map(u32::to_be_bytes)
+        .collect();
+        image.sections[0].splits.push(
+            0x82001020,
+            ObjSplit {
+                unit: "a".into(),
+                end: 0x82001030,
+                ..Default::default()
+            },
+        );
+        image.sections[0].relocations.insert(
+            0x8200100C,
+            ObjReloc {
+                target_symbol: 2,
+                kind: ObjRelocKind::PpcRel14,
+                addend: 0,
+                module: None,
+            },
+        )?;
+        for (address, kind) in [
+            (0x82001020, ObjRelocKind::PpcAddr16Ha),
+            (0x82001024, ObjRelocKind::PpcAddr16Lo),
+        ] {
+            image.sections[0].relocations.insert(
+                address,
+                ObjReloc {
+                    target_symbol: 1,
+                    kind,
+                    addend: 0x8004,
+                    module: None,
+                },
+            )?;
+        }
+        image.sections[1].splits.clear();
+        for (start, end, unit) in [(0x82002000, 0x82002008, "a"), (0x82002008, 0x82002010, "b")] {
+            image.sections[1].splits.push(
+                start,
+                ObjSplit {
+                    unit: unit.into(),
+                    end,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut rdata = ObjSection {
+            name: ".rdata".into(),
+            kind: ObjSectionKind::ReadOnlyData,
+            address: 0x82003000,
+            size: 12,
+            data: vec![1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8],
+            align: 4,
+            ..Default::default()
+        };
+        for (start, end, unit) in [(0x82003000, 0x82003004, "a"), (0x82003008, 0x8200300C, "b")] {
+            rdata.splits.push(
+                start,
+                ObjSplit {
+                    unit: unit.into(),
+                    end,
+                    align: Some(4),
+                    ..Default::default()
+                },
+            );
+        }
+        image.sections.push(rdata);
+        prepare_coff_symbols(&mut image)?;
+        let defaults = split_obj(&image, None)?;
+        let before = defaults
+            .iter()
+            .map(write_coff)
+            .collect::<Result<Vec<_>>>()?;
+        let linked = link_objects(&image, &defaults)?;
+        assert_eq!(
+            before,
+            defaults
+                .iter()
+                .map(write_coff)
+                .collect::<Result<Vec<_>>>()?
+        );
+        let mut contributions = BTreeMap::new();
+        for obj in &linked {
+            let bytes = write_link_coff(obj)?;
+            let coff = object::File::parse(bytes.as_slice())?;
+            for section in coff.sections() {
+                contributions.insert(section.name()?.to_owned(), section.size());
+            }
+        }
+        assert_eq!(contributions[".text$82001000"], 16);
+        assert_eq!(contributions[".text$82001010"], 16);
+        assert_eq!(contributions[".text$82001020"], 16);
+        assert_eq!(contributions[".pdata$82002000"], 8);
+        assert_eq!(contributions[".pdata$82002008"], 8);
+        assert_eq!(contributions[".rdata$82003004"], 4);
+        // A local XDK harness can link these redistributable synthetic objects.
+        if let Ok(path) = std::env::var("JEFF_RELINK_FIXTURE_DIR") {
+            std::fs::create_dir_all(&path)?;
+            for obj in linked.iter().filter(|o| !o.sections.is_empty()) {
+                std::fs::write(
+                    std::path::Path::new(&path).join(format!("{}.obj", obj.name)),
+                    write_link_coff(obj)?,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn link_mode_retains_original_xex_import_tokens() -> Result<()> {
+        let mut image = fixture();
+        let mut original = image.sections[0].data.clone();
+        original[..8]
+            .copy_from_slice(&[0x010001A4u32.to_be_bytes(), 0x020001A4u32.to_be_bytes()].concat());
+        image.sections[0].original_data = Some(original.clone());
+        prepare_coff_symbols(&mut image)?;
+        let defaults = split_obj(&image, None)?;
+        let linked = crate::util::relink::link_objects(&image, &defaults)?;
+        let section = &linked.iter().find(|obj| obj.name == "a").unwrap().sections[0];
+        assert_eq!(&section.data[..8], &original[..8]);
+        assert!(section.relocations.iter().all(|(offset, _)| offset >= 8));
+        assert_ne!(&defaults[0].sections[0].data[..8], &original[..8]);
         Ok(())
     }
 

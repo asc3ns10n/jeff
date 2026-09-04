@@ -30,9 +30,59 @@ This is NOT meant to be run on its own, but rather part of a build system, such 
 
 ## Known Issues/Hacks
 - Parsing/applying .pdb files currently has limited support.
-- Trying to link the generated COFFs into a final exe and comparing sections of it against the original extracted exe (like what the GC/Wii toolkit does with elfs/dols)
-is currently unsupported, as it was out of the initial scope of the project.
+- Upstream's default COFFs target objdiff, not a native relink. This TU2 fork adds
+  a separate opt-in output described below. A byte-identical extracted PE also
+  needs the project's container-normalization step; native link.exe headers and
+  metadata layout differ from the XEX-extracted container.
 - Because this was forked from encounter's GC/Wii toolkit, there is naturally still a lot of loose GC/Wii tailored code in this codebase that needs removing/refactoring.
+
+## Opt-in relink objects (TU2 fork)
+
+```sh
+jeff xex split config.yml build/TU2 --relink
+```
+
+The usual `obj/` files and `config.json` keep their original output. The flag
+adds `relink/obj/` and `relink/config.json`, reusing the image-wide symbol
+identities from `01752b4`. Each code/data range has an address suffix such as
+`.text$825199A8`; explicit zero-gap contributions preserve alignment bytes.
+Link objects retain PE section flags, relocation addends, the initialized/BSS
+boundary, and original XEX import tokens. Default objects retain the unstripped
+imports used by objdiff.
+
+The PPCBE writer uses instruction-start REFHI/REFLO fixups with PAIR records,
+and contribution-relative REL14/REL24 addends. Already-resolved branches inside
+one contribution stay resolved. The zero-fill tail uses `.dataz$<address>` and
+requires `/MERGE:.dataz=.data`; this sorts it after initialized `.data` input.
+Singleton Xbox/PE metadata remains opaque. On TU2, the `.reloc` payload is an
+address-ordered contribution after `.XBLD`, and `.XEXID` temporarily clears its
+nonpageable flag so link.exe preserves its packed VA. The consumer wrapper
+supplies header/metadata padding, then restores the original PE container
+layout around the linked bytes. This is extraction/relink support, not XEX
+signing or a general replacement for the XDK's image builder.
+
+The consumer's [relink notes](https://github.com/asc3ns10n/RiseOfARecomp/blob/work/relink2/docs/RELINK.md)
+describe the XDK invocation, native-versus-normalized results, and opt-in Ninja
+rules. Install this build beside the matching binary, never over it:
+
+```sh
+cargo build --release
+install -m 755 target/release/jeff ~/.local/bin/jeff-roan-tu2-relink
+```
+
+Validation:
+
+```sh
+cargo test
+python3 tests/relink_xdk.py --linker "$XDK_LINKER" --wine-prefix "$WINEPREFIX"
+```
+
+`default_split_output_unchanged` fixes the fixture's pre-change COFF hashes; it
+was committed and passed before implementation (`a3d2df9`). The XDK test uses
+only synthetic input and checks duplicate names, cross-object labels,
+interleaved contributions, REL14/REL24, high/low address addends, `.pdata`, and
+padding at their linked VAs. The XDK/runtime are supplied locally and are not
+part of the repository.
 
 ## Want to contribute?
 Whether you want to add a new feature, or would like to fix one of the known issues, I would love your contribution!
