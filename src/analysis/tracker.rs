@@ -483,6 +483,16 @@ impl Tracker {
 
         if let Some(info) = &obj.pdata_funcs.get(&function_start) {
             for handler in info.handlers.keys() {
+                // A handler that is a function in its own right (declared in
+                // symbols.txt) is analyzed on its own; tracing it here, inside
+                // the parent's range, would relocate its intra-function branches.
+                let is_own_function = obj
+                    .symbols
+                    .at_section_address(handler.section, handler.address)
+                    .any(|(_, s)| s.kind == ObjSymbolKind::Function);
+                if is_own_function {
+                    continue;
+                }
                 possible_missed_branches.insert(*handler, VM::new());
             }
         }
