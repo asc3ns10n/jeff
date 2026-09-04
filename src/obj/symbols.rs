@@ -278,6 +278,9 @@ impl ObjSymbols {
             self.at_section_address(section_index, in_symbol.address)
                 .find(|(_, symbol)| {
                     symbol.kind == in_symbol.kind ||
+                    // Same name at the same address is the same symbol, whatever
+                    // kind the second source (signature scan, map, pdb) gave it
+                    symbol.name == in_symbol.name ||
                     // Replace auto symbols with real symbols
                     (symbol.kind == ObjSymbolKind::Unknown && is_auto_symbol(symbol))
                 })
