@@ -516,7 +516,20 @@ pub fn write_coff(obj: &ObjInfo) -> Result<Vec<u8>> {
             size: 0,
             kind: match sym.kind {
                 ObjSymbolKind::Function => SymbolKind::Text,
-                ObjSymbolKind::Object => SymbolKind::Data,
+                ObjSymbolKind::Object => {
+                    // A jump table inside a code section is a label, not a data
+                    // object: a data symbol makes objdiff end the enclosing
+                    // function at the table, truncating every switch.
+                    let in_code = sym
+                        .section
+                        .and_then(|i| obj.sections.get(i))
+                        .map_or(false, |s| s.kind == ObjSectionKind::Code);
+                    if in_code && sym.name.starts_with("jumptable_") {
+                        SymbolKind::Label
+                    } else {
+                        SymbolKind::Data
+                    }
+                }
                 ObjSymbolKind::Section => SymbolKind::Section,
                 ObjSymbolKind::Unknown => match sym.section {
                     Some(_) => SymbolKind::Label,
