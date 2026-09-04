@@ -359,6 +359,25 @@ mod tests {
         image
     }
 
+    // Golden hashes captured from 01752b4 before any relink implementation.
+    // Exercise the default splitter and writer used when link mode is absent.
+    #[test]
+    fn default_split_output_unchanged() -> Result<()> {
+        use sha1::{Digest, Sha1};
+        let mut image = fixture();
+        prepare_coff_symbols(&mut image)?;
+        let hashes = split_obj(&image, None)?
+            .iter()
+            .map(|obj| Ok((obj.name.clone(), hex::encode(Sha1::digest(write_coff(obj)?)))))
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(hashes, vec![
+            ("a".into(), "b2d702b6fa0238551c391f5797d660da6f4371d8".into()),
+            ("b".into(), "fcf56fc9a7d131195bb202421f97d28a776318b4".into()),
+            ("pdata".into(), "b88acc6f930f88d3ceb17e8a3fa69b13ec78ca6f".into()),
+        ]);
+        Ok(())
+    }
+
     #[test]
     fn duplicate_functions_cross_object_label_and_pdata() -> Result<()> {
         let mut image = fixture();
