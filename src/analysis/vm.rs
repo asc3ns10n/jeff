@@ -707,7 +707,15 @@ impl VM {
                         source_reg: source as u8,
                     };
                 } else if let GprValue::Constant(base) = self.gpr[source].value {
-                    let address = base.wrapping_add(ins.field_simm() as u64) as u32;
+                    // DS-form's low two bits select the opcode, not the displacement.
+                    // field_ds() already masks them and sign-extends the byte offset.
+                    let displacement = match op {
+                        Opcode::Ld | Opcode::Ldu | Opcode::Lwa | Opcode::Std | Opcode::Stdu => {
+                            ins.field_ds()
+                        }
+                        _ => ins.field_simm(),
+                    };
+                    let address = base.wrapping_add(displacement as u64) as u32;
                     if let Some(target) = section_address_for(obj, ins_addr, address) {
                         if is_update_op(op) {
                             self.gpr[source].set_lo(
@@ -865,6 +873,9 @@ pub fn is_load_op(op: Opcode) -> bool {
     matches!(
         op,
         Opcode::Lbz
+            | Opcode::Ld
+            | Opcode::Ldu
+            | Opcode::Lwa
             | Opcode::Lbzu
             | Opcode::Lha
             | Opcode::Lhau
@@ -886,6 +897,8 @@ pub fn is_store_op(op: Opcode) -> bool {
     matches!(
         op,
         Opcode::Stb
+            | Opcode::Std
+            | Opcode::Stdu
             | Opcode::Stbu
             | Opcode::Sth
             | Opcode::Sthu
@@ -913,6 +926,8 @@ pub fn is_update_op(op: Opcode) -> bool {
     matches!(
         op,
         Opcode::Lbzu
+            | Opcode::Ldu
+            | Opcode::Stdu
             | Opcode::Lbzux
             | Opcode::Lfdu
             | Opcode::Lfdux

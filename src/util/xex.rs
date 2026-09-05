@@ -452,7 +452,14 @@ fn adjusted_data_for_relocs(section: &ObjSection) -> Result<Vec<u8>> {
                 ins = 0;
             }
             ObjRelocKind::PpcAddr16Hi | ObjRelocKind::PpcAddr16Ha | ObjRelocKind::PpcAddr16Lo => {
-                ins &= !0xFFFF;
+                // DS-form low bits are the opcode extension (ld/ldu/lwa, std/stdu).
+                let mask =
+                    if reloc.kind == ObjRelocKind::PpcAddr16Lo && matches!(ins >> 26, 58 | 62) {
+                        0xFFFC
+                    } else {
+                        0xFFFF
+                    };
+                ins &= !mask;
             }
             ObjRelocKind::PpcRel24 => {
                 ins &= !0x3FFFFFC;
