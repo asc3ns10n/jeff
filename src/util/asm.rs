@@ -942,7 +942,13 @@ where
             writeln!(w)?;
             Ok(reloc_address + 4)
         }
-        ObjRelocKind::PpcRel14 | ObjRelocKind::PpcRel24 => {
+        // An unsized inline object can leave subsequent instructions in data mode.
+        // These relocations still describe instruction operands, not raw pointers.
+        ObjRelocKind::PpcRel14
+        | ObjRelocKind::PpcRel24
+        | ObjRelocKind::PpcAddr16Hi
+        | ObjRelocKind::PpcAddr16Ha
+        | ObjRelocKind::PpcAddr16Lo => {
             let off = (reloc_address - section.address) as usize;
             let code = u32::from_be_bytes(section.data[off..off + 4].try_into().unwrap());
             let ins = Ins::new(code, Extensions::xenon());
@@ -1109,6 +1115,78 @@ fn is_illegal_instruction(code: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_relocations_after_unsized_data_symbol() -> Result<()> {
+        use crate::obj::ObjKind;
+
+        // A size-less jump-table object leaves following case code in data mode.
+        // The real TU2 case is lis/lfs at 0x82613118 in ObjectInnerStreamLeaves.
+        for (hi, suffix) in [
+            (ObjRelocKind::PpcAddr16Ha, "ha"),
+            (ObjRelocKind::PpcAddr16Hi, "h"),
+        ] {
+            for (load, mnemonic, register) in [
+                (0xc00b4260u32, "lfs", "f0"),
+                (0xe86b4260, "ld", "r3"),
+                (0xe86b4261, "ldu", "r3"),
+                (0xe86b4262, "lwa", "r3"),
+                (0xf86b4260, "std", "r3"),
+                (0xf86b4261, "stdu", "r3"),
+            ] {
+                let mut obj = ObjInfo::new(
+                    ObjKind::Relocatable,
+                    "case".into(),
+                    vec![],
+                    vec![ObjSection {
+                        name: ".text".into(),
+                        kind: ObjSectionKind::Code,
+                        size: 12,
+                        data: [0u32, 0x3d608200, load]
+                            .into_iter()
+                            .flat_map(u32::to_be_bytes)
+                            .collect(),
+                        ..Default::default()
+                    }],
+                );
+                obj.symbols.add_direct(ObjSymbol {
+                    name: "jumptable".into(),
+                    section: Some(0),
+                    kind: ObjSymbolKind::Object,
+                    ..Default::default()
+                })?;
+                let target = obj.symbols.add_direct(ObjSymbol {
+                    name: "constant".into(),
+                    kind: ObjSymbolKind::Object,
+                    ..Default::default()
+                })?;
+                for (address, kind) in [(4, hi), (8, ObjRelocKind::PpcAddr16Lo)] {
+                    obj.sections[0].relocations.insert(
+                        address,
+                        ObjReloc {
+                            kind,
+                            target_symbol: target,
+                            addend: 0,
+                            module: None,
+                        },
+                    )?;
+                }
+                let mut output = Vec::new();
+                write_asm(&mut output, &obj)?;
+                let output = String::from_utf8(output)?;
+                assert!(output.contains("\t.4byte 0x00000000"), "{output}");
+                assert!(
+                    output.contains(&format!("lis r11, constant@{suffix}")),
+                    "{output}"
+                );
+                assert!(
+                    output.contains(&format!("{mnemonic} {register}, constant@l(r11)")),
+                    "{output}"
+                );
+            }
+        }
+        Ok(())
+    }
 
     fn make_test_symbol(kind: ObjSymbolKind) -> ObjSymbol {
         ObjSymbol {
