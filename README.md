@@ -50,6 +50,17 @@ Link objects retain PE section flags, relocation addends, the initialized/BSS
 boundary, and original XEX import tokens. Default objects retain the unstripped
 imports used by objdiff.
 
+For references that exist only in compiled source, `coff_exports: [lbl_8208C474]`
+in the split configuration requests extra external identities after split layout
+is fixed. Existing names keep the identity pass's spelling. A missing
+`lbl_XXXXXXXX` may alias an existing configured symbol at exactly that address;
+it never replaces the canonical name or invents an arbitrary address. An empty
+list preserves default object hashes. The consumer scans source identifiers into
+this list on its scratch configuration and audits the affected default objects:
+only added external symbols and the necessary symbol-index remapping are allowed,
+with unchanged section bytes/layout and relocation identities. Missing configured
+identities are warned about and remain unresolved for the consumer to exclude.
+
 The PPCBE writer uses instruction-start REFHI/REFLO fixups with PAIR records,
 and contribution-relative REL14/REL24 addends. Already-resolved branches inside
 one contribution stay resolved. The zero-fill tail uses `.dataz$<address>` and

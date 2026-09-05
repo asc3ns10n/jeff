@@ -96,6 +96,9 @@ pub struct ProjectConfig {
     pub detect_objects: bool,
     #[serde(default = "bool_true", skip_serializing_if = "is_true")]
     pub detect_strings: bool,
+    /// Extra COFF exports needed by compiled source, applied after split layout.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub coff_exports: Vec<String>,
     #[serde(default = "bool_true", skip_serializing_if = "is_true")]
     pub use_pdb_types: bool,
     #[serde(default = "bool_true", skip_serializing_if = "is_true")]
@@ -137,6 +140,7 @@ impl Default for ProjectConfig {
             modules: vec![],
             detect_objects: true,
             detect_strings: true,
+            coff_exports: vec![],
             use_pdb_types: true,
             write_asm: true,
             common_start: None,

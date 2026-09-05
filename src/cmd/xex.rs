@@ -31,7 +31,7 @@ use crate::{
     },
     util::{
         asm::write_asm,
-        coff_symbols::prepare_coff_symbols,
+        coff_symbols::{prepare_coff_symbols, prepare_requested_exports},
         config::{apply_splits_file, apply_symbols_file, write_splits_file, write_symbols_file},
         dep::DepFile,
         exe::InputtedExecutable,
@@ -253,6 +253,7 @@ fn split_write_obj_exe(
     update_splits(&mut module.obj, None, false, !config.quick_analysis)?;
 
     prepare_coff_symbols(&mut module.obj)?;
+    prepare_requested_exports(&mut module.obj, &config.coff_exports)?;
 
     debug!("Writing configuration");
     if let Some(symbols_path) = &module.config.symbols {

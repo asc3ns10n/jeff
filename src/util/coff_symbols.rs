@@ -121,6 +121,66 @@ pub fn prepare_coff_symbols(obj: &mut ObjInfo) -> Result<()> {
     Ok(())
 }
 
+/// Export only explicitly requested source identities, without changing analysis or
+/// split boundaries. Address labels may alias an existing configured symbol, never
+/// an arbitrary byte. Canonical names and relocation targets remain unchanged.
+pub fn prepare_requested_exports(obj: &mut ObjInfo, names: &[String]) -> Result<()> {
+    for name in names.iter().collect::<BTreeSet<_>>() {
+        let matches: Vec<_> = obj
+            .symbols
+            .iter()
+            .filter(|(_, s)| {
+                s.name == *name && s.section.is_some() && s.kind != ObjSymbolKind::Section
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if matches.len() == 1 {
+            let index = matches[0];
+            let mut symbol = obj.symbols[index].clone();
+            if symbol.flags.is_local() {
+                symbol.flags.set_scope(ObjSymbolScope::Global);
+            }
+            symbol.flags.0 |= ObjSymbolFlags::CoffExternal;
+            obj.symbols.replace(index, symbol)?;
+            continue;
+        }
+        if !matches.is_empty() {
+            anyhow::bail!("Ambiguous requested COFF export {name}");
+        }
+        let address = name
+            .strip_prefix("lbl_")
+            .filter(|s| s.len() == 8)
+            .and_then(|s| u32::from_str_radix(s, 16).ok());
+        let owner = address.and_then(|address| {
+            obj.symbols
+                .iter()
+                .find(|(_, s)| {
+                    s.address == address
+                        && s.section.is_some()
+                        && s.kind != ObjSymbolKind::Section
+                        && s.flags.0.contains(ObjSymbolFlags::NameFromConfig)
+                })
+                .map(|(_, s)| s.clone())
+        });
+        if let Some(owner) = owner {
+            let mut alias = crate::obj::ObjSymbol {
+                name: name.clone(),
+                address: owner.address,
+                section: owner.section,
+                ..Default::default()
+            };
+            alias.flags.set_scope(ObjSymbolScope::Global);
+            alias.flags.0 |= ObjSymbolFlags::CoffExternal;
+            obj.symbols.add_direct(alias)?;
+        } else {
+            // A source can mention symbols absent from this image (partial units).
+            // Keep their unresolved identity visible to the wrapper's exclusion gate.
+            log::warn!("Requested COFF export {name} has no unique configured identity");
+        }
+    }
+    Ok(())
+}
+
 /// COFF externals with null type read as data, even in .text. Give enclosing
 /// functions their standard auxiliary size record so objdiff does not truncate
 /// them at a promoted label. The object writer has no function-aux API yet.
@@ -392,6 +452,94 @@ mod tests {
                 ),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn requested_local_export_keeps_function_extent_and_rejects_arbitrary_addresses() -> Result<()>
+    {
+        let mut image = fixture();
+        let mut label = ObjSymbol {
+            name: "compiled_only_local".into(),
+            address: 0x82001004,
+            section: Some(0),
+            ..Default::default()
+        };
+        label.flags.set_scope(ObjSymbolScope::Local);
+        image.symbols.add_direct(label)?;
+        prepare_coff_symbols(&mut image)?;
+        let before_count = image.symbols.iter().count();
+        prepare_requested_exports(
+            &mut image,
+            &["compiled_only_local".into(), "lbl_82001007".into()],
+        )?;
+        assert_eq!(image.symbols.iter().count(), before_count);
+        let bytes = write_coff(&split_obj(&image, None)?[0])?;
+        let coff = object::File::parse(bytes.as_slice())?;
+        assert!(
+            coff.symbols()
+                .find(|s| s.name().ok() == Some("compiled_only_local"))
+                .unwrap()
+                .is_global()
+        );
+        assert_eq!(
+            coff.symbols()
+                .find(|s| s.name().ok() == Some(NAME))
+                .unwrap()
+                .size(),
+            16
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_only_label_export_preserves_layout_and_canonical_identity() -> Result<()> {
+        let mut image = fixture();
+        // No image relocation targets this label: only compiled source needs it.
+        let mut symbol = ObjSymbol {
+            name: "canonical_constant".into(),
+            address: 0x82001014,
+            section: Some(0),
+            ..Default::default()
+        };
+        symbol.flags.0 |= ObjSymbolFlags::NameFromConfig;
+        image.symbols.add_direct(symbol)?;
+        prepare_coff_symbols(&mut image)?;
+        let before = split_obj(&image, None)?;
+        prepare_requested_exports(&mut image, &["lbl_82001014".into()])?;
+        let after = split_obj(&image, None)?;
+        for (a, b) in before.iter().zip(&after) {
+            let a_bytes = write_coff(a)?;
+            let b_bytes = write_coff(b)?;
+            if a.name != "b" {
+                assert_eq!(a_bytes, b_bytes);
+            }
+            let a_coff = object::File::parse(a_bytes.as_slice())?;
+            let b_coff = object::File::parse(b_bytes.as_slice())?;
+            for (a, b) in a_coff.sections().zip(b_coff.sections()) {
+                assert_eq!(a.name()?, b.name()?);
+                assert_eq!(a.data()?, b.data()?);
+                assert_eq!(a.align(), b.align());
+            }
+            if b.name == "b" {
+                assert!(
+                    b_coff
+                        .symbols()
+                        .any(|s| s.name().ok() == Some("canonical_constant"))
+                );
+                let alias = b_coff
+                    .symbols()
+                    .find(|s| s.name().ok() == Some("lbl_82001014"))
+                    .unwrap();
+                assert!(alias.is_global());
+                assert_eq!(alias.address(), 4);
+            }
+        }
+        // Re-applying the list does not add duplicates; an empty list is a no-op.
+        let once = write_coff(&after[1])?;
+        prepare_requested_exports(&mut image, &["lbl_82001014".into()])?;
+        prepare_requested_exports(&mut image, &[])?;
+        assert_eq!(once, write_coff(&split_obj(&image, None)?[1])?);
         Ok(())
     }
 
